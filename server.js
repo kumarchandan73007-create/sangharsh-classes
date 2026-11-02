@@ -1,0 +1,24 @@
+const express=require("express"),multer=require("multer"),fs=require("fs"),path=require("path"),crypto=require("crypto");
+const app=express(),PORT=process.env.PORT||3000,ROOT=__dirname;
+const DATA=path.join(ROOT,"data"),UPLOADS=path.join(ROOT,"uploads"),DB=path.join(DATA,"db.json");
+for(const d of [DATA,UPLOADS])if(!fs.existsSync(d))fs.mkdirSync(d,{recursive:true});
+function hash(p,s=crypto.randomBytes(16).toString("hex")){return s+":"+crypto.scryptSync(p,s,64).toString("hex")}
+function verify(p,v){try{const [s,k]=v.split(":");return crypto.timingSafeEqual(crypto.scryptSync(p,s,64),Buffer.from(k,"hex"))}catch{return false}}
+if(!fs.existsSync(DB))fs.writeFileSync(DB,JSON.stringify({admin:{username:process.env.ADMIN_USER||"admin",passwordHash:hash(process.env.ADMIN_PASSWORD||"admin123")},notes:[]},null,2));
+const read=()=>JSON.parse(fs.readFileSync(DB,"utf8")),write=d=>fs.writeFileSync(DB,JSON.stringify(d,null,2));
+const sessions=new Map();
+function cookies(req){return Object.fromEntries((req.headers.cookie||"").split(";").filter(Boolean).map(x=>{let i=x.indexOf("=");return[x.slice(0,i).trim(),decodeURIComponent(x.slice(i+1))]}))}
+function admin(req,res,next){let sid=cookies(req).sid;if(!sid||!sessions.has(sid))return res.status(401).json({error:"Admin login required"});next()}
+const storage=multer.diskStorage({destination:(_,__,cb)=>cb(null,UPLOADS),filename:(_,f,cb)=>cb(null,Date.now()+"-"+crypto.randomBytes(6).toString("hex")+path.extname(f.originalname).toLowerCase())});
+const upload=multer({storage,limits:{fileSize:25*1024*1024},fileFilter:(_,f,cb)=>cb((f.mimetype==="application/pdf"||path.extname(f.originalname).toLowerCase()===".pdf")?null:new Error("Only PDF files are allowed."),true)});
+app.use(express.json());app.use(express.urlencoded({extended:true}));app.use(express.static(path.join(ROOT,"public")));
+app.get("/",(_,res)=>res.sendFile(path.join(ROOT,"public/index.html")));app.get("/admin",(_,res)=>res.sendFile(path.join(ROOT,"public/admin.html")));
+app.get("/api/notes",(req,res)=>{let d=read(),n=d.notes||[],q=String(req.query.search||"").toLowerCase(),c=String(req.query.class||"all"),s=String(req.query.subject||"all"),t=String(req.query.type||"all");if(q)n=n.filter(x=>[x.title,x.chapter,x.subject,x.className,x.type,x.description].join(" ").toLowerCase().includes(q));if(c!=="all")n=n.filter(x=>x.className===c);if(s!=="all")n=n.filter(x=>x.subject===s);if(t!=="all")n=n.filter(x=>x.type===t);n.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));res.json(n)});
+app.get("/api/me",(req,res)=>res.json({authenticated:!!cookies(req).sid&&sessions.has(cookies(req).sid)}));
+app.post("/api/login",(req,res)=>{let d=read(),{username,password}=req.body||{};if(username!==d.admin.username||!verify(password||"",d.admin.passwordHash))return res.status(401).json({error:"Invalid username or password"});let sid=crypto.randomBytes(32).toString("hex");sessions.set(sid,{username});res.setHeader("Set-Cookie",`sid=${sid}; HttpOnly; SameSite=Lax; Path=/`);res.json({ok:true})});
+app.post("/api/logout",(req,res)=>{let sid=cookies(req).sid;if(sid)sessions.delete(sid);res.setHeader("Set-Cookie","sid=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/");res.json({ok:true})});
+app.post("/api/notes",admin,upload.single("pdf"),(req,res)=>{try{if(!req.file)return res.status(400).json({error:"Select a PDF"});let {title,chapter,className,subject,type,description}=req.body;if(!title||!className||!subject){fs.unlinkSync(req.file.path);return res.status(400).json({error:"Title, class and subject are required"});}if(!["Class 8","Class 9","Class 10"].includes(className)){fs.unlinkSync(req.file.path);return res.status(400).json({error:"Only Class 8, 9 and 10 are supported"});}let d=read(),note={id:crypto.randomUUID(),title:title.trim(),chapter:(chapter||"").trim(),className,subject,type:type||"Notes",description:(description||"").trim(),originalName:req.file.originalname,filename:req.file.filename,size:req.file.size,createdAt:new Date().toISOString()};d.notes.push(note);write(d);res.json({ok:true,note})}catch(e){res.status(500).json({error:e.message})}});
+app.delete("/api/notes/:id",admin,(req,res)=>{let d=read(),i=d.notes.findIndex(n=>n.id===req.params.id);if(i<0)return res.status(404).json({error:"Note not found"});let f=path.join(UPLOADS,path.basename(d.notes[i].filename));if(fs.existsSync(f))fs.unlinkSync(f);d.notes.splice(i,1);write(d);res.json({ok:true})});
+app.get("/files/:filename",(req,res)=>{let f=path.join(UPLOADS,path.basename(req.params.filename));if(!fs.existsSync(f))return res.status(404).send("File not found");res.sendFile(f)});
+app.use((e,req,res,next)=>res.status(400).json({error:e.message}));
+app.listen(PORT,()=>{console.log(`Sungharsh Classes: http://localhost:${PORT}`);console.log(`Admin: http://localhost:${PORT}/admin`);console.log("Default admin: admin / admin123 (change before going online)")});
